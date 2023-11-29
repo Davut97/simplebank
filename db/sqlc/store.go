@@ -4,40 +4,55 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	_ "github.com/golang/mock/mockgen/model"
 )
 
-type Store struct {
-	*Queries
-	db *sql.DB
+type Store interface {
+	TransferTx(ctx context.Context, arg TransferTxParams) (TransferTxResult, error)
+	Querier
 }
 
-func NewStore(db *sql.DB) *Store {
-	return &Store{
+// SQLStore provides all functions to execute db queries and transaction
+type SQLStore struct {
+	db *sql.DB
+	*Queries
+}
+
+// NewStore creates a new store
+func NewStore(db *sql.DB) Store {
+	return &SQLStore{
 		db:      db,
 		Queries: New(db),
 	}
 }
-func (store *Store) execTx(ctx context.Context, fn func(*Queries) error) error {
+
+// ExecTx executes a function within a database transaction
+func (store *SQLStore) execTx(ctx context.Context, fn func(*Queries) error) error {
 	tx, err := store.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
+
 	q := New(tx)
 	err = fn(q)
 	if err != nil {
-		if rbError := tx.Rollback(); rbError != nil {
-			return fmt.Errorf("tx error : %v, rb err: %v", err, rbError)
+		if rbErr := tx.Rollback(); rbErr != nil {
+			return fmt.Errorf("tx err: %v, rb err: %v", err, rbErr)
 		}
+		return err
 	}
-	return tx.Commit()
 
+	return tx.Commit()
 }
 
+// TransferTxParams contains the input parameters of the transfer transaction
 type TransferTxParams struct {
 	FromAccountID int64 `json:"from_account_id"`
 	ToAccountID   int64 `json:"to_account_id"`
 	Amount        int64 `json:"amount"`
 }
+
+// TransferTxResult is the result of the transfer transaction
 type TransferTxResult struct {
 	Transfer    Transfer `json:"transfer"`
 	FromAccount Account  `json:"from_account"`
@@ -46,14 +61,14 @@ type TransferTxResult struct {
 	ToEntry     Entry    `json:"to_entry"`
 }
 
-var txKey = struct{}{}
-
-func (store *Store) TransferTx(ctx context.Context, arg TransferTxParams) (TransferTxResult, error) {
+// TransferTx performs a money transfer from one account to the other.
+// It creates the transfer, add account entries, and update accounts' balance within a database transaction
+func (store *SQLStore) TransferTx(ctx context.Context, arg TransferTxParams) (TransferTxResult, error) {
 	var result TransferTxResult
+
 	err := store.execTx(ctx, func(q *Queries) error {
 		var err error
-		txName := ctx.Value(txKey)
-		fmt.Println(txName, "create transfer")
+
 		result.Transfer, err = q.CreateTransfer(ctx, CreateTransferParams{
 			FromAccountID: arg.FromAccountID,
 			ToAccountID:   arg.ToAccountID,
@@ -62,7 +77,6 @@ func (store *Store) TransferTx(ctx context.Context, arg TransferTxParams) (Trans
 		if err != nil {
 			return err
 		}
-		fmt.Println(txName, "create entry 1")
 
 		result.FromEntry, err = q.CreateEntry(ctx, CreateEntryParams{
 			AccountID: arg.FromAccountID,
@@ -71,7 +85,6 @@ func (store *Store) TransferTx(ctx context.Context, arg TransferTxParams) (Trans
 		if err != nil {
 			return err
 		}
-		fmt.Println(txName, "create entry 2")
 
 		result.ToEntry, err = q.CreateEntry(ctx, CreateEntryParams{
 			AccountID: arg.ToAccountID,
@@ -80,21 +93,20 @@ func (store *Store) TransferTx(ctx context.Context, arg TransferTxParams) (Trans
 		if err != nil {
 			return err
 		}
-		fmt.Println(txName, "get account 1")
+
 		if arg.FromAccountID < arg.ToAccountID {
-
-			result.FromAccount, result.ToAccount, err = addMony(ctx, q, arg.FromAccountID, -arg.Amount, arg.ToAccountID, arg.Amount)
+			result.FromAccount, result.ToAccount, err = addMoney(ctx, q, arg.FromAccountID, -arg.Amount, arg.ToAccountID, arg.Amount)
 		} else {
-			result.ToAccount, result.FromAccount, err = addMony(ctx, q, arg.ToAccountID, arg.Amount, arg.FromAccountID, -arg.Amount)
-
+			result.ToAccount, result.FromAccount, err = addMoney(ctx, q, arg.ToAccountID, arg.Amount, arg.FromAccountID, -arg.Amount)
 		}
 
-		return nil
+		return err
 	})
 
 	return result, err
 }
-func addMony(
+
+func addMoney(
 	ctx context.Context,
 	q *Queries,
 	accountID1 int64,
@@ -109,13 +121,10 @@ func addMony(
 	if err != nil {
 		return
 	}
+
 	account2, err = q.AddAccountBalance(ctx, AddAccountBalanceParams{
 		ID:     accountID2,
 		Amount: amount2,
 	})
-	if err != nil {
-		return
-	}
 	return
-
 }
